@@ -37,7 +37,7 @@ void xhci_sync_transfer_init(xhci_sync_transfer_t* xfer) {
     xfer->context.data = xfer;
 }
 
-mx_status_t xhci_sync_transfer_wait(xhci_sync_transfer_t* xfer) {
-    completion_wait(&xfer->completion, MX_TIME_INFINITE);
+mx_status_t xhci_sync_transfer_wait(xhci_sync_transfer_t* xfer, mx_time_t timeout) {
+    completion_wait(&xfer->completion, timeout);
     return xfer->result;
 }

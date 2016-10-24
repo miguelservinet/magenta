@@ -33,4 +33,4 @@ inline int xhci_sync_command_slot_id(xhci_sync_command_t* command) {
 }
 
 void xhci_sync_transfer_init(xhci_sync_transfer_t* xfer);
-mx_status_t xhci_sync_transfer_wait(xhci_sync_transfer_t* xfer);
+mx_status_t xhci_sync_transfer_wait(xhci_sync_transfer_t* xfer, mx_time_t timeout);

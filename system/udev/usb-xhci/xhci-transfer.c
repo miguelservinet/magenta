@@ -275,7 +275,7 @@ int xhci_control_request(xhci_t* xhci, uint32_t slot_id, uint8_t request_type, u
     if (result != NO_ERROR)
         return result;
 
-    result = xhci_sync_transfer_wait(&xfer);
+    result = xhci_sync_transfer_wait(&xfer, MX_SEC(5));
     xprintf("xhci_control_request returning %d\n", result);
     return result;
 }

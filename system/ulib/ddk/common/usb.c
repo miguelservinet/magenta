@@ -45,7 +45,7 @@ mx_status_t usb_control(mx_device_t* device, uint8_t request_type, uint8_t reque
     txn->complete_cb = usb_control_complete;
     txn->cookie = &completion;
     iotxn_queue(device, txn);
-    completion_wait(&completion, MX_TIME_INFINITE);
+    completion_wait(&completion, MX_SEC(5));
 
     status = txn->status;
     if (status == NO_ERROR) {
@@ -75,19 +75,23 @@ mx_status_t usb_get_string_descriptor(mx_device_t* device, uint8_t id, char** ou
     *out_string = NULL;
     memset(languages, 0, sizeof(languages));
 
+printf("usb_get_string_descriptor 1\n");
     // read list of supported languages
     mx_status_t result = usb_control(device,
             USB_DIR_IN | USB_TYPE_STANDARD |  USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR,
             (USB_DT_STRING << 8) | 0, 0, languages, sizeof(languages));
+printf("usb_get_string_descriptor 2: %d\n", result);
     if (result < 0) return result;
     languageCount = (result - 2) / 2;
 
     for (int i = 1; i <= languageCount; i++) {
         memset(buffer, 0, sizeof(buffer));
 
+printf("usb_get_string_descriptor 3\n");
         result = usb_control(device,
                 USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR,
                 (USB_DT_STRING << 8) | id, le16toh(languages[i]), buffer, sizeof(buffer));
+printf("usb_get_string_descriptor 4: %d\n", result);
         if (result > 0) {
             // skip first word, and copy the rest to the string, changing shorts to bytes.
             result /= 2;
@@ -100,6 +104,7 @@ mx_status_t usb_get_string_descriptor(mx_device_t* device, uint8_t id, char** ou
         }
     }
 
+printf("usb_get_string_descriptor 5\n");
     char* s = strdup(string);
     if (!s) return ERR_NO_MEMORY;
     *out_string = s;
