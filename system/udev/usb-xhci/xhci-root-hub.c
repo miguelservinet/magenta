@@ -219,9 +219,11 @@ static void xhci_reset_port(xhci_t* xhci, xhci_root_hub_t* rh, int rh_port_index
     XHCI_WRITE32(portsc, temp);
 
     int port_index = xhci->rh_port_map[rh_port_index];
+    mtx_lock(&rh->mutex);
     usb_port_status_t* status = &rh->port_status[port_index];
     status->wPortStatus |= USB_PORT_RESET;
     status->wPortChange |= USB_PORT_RESET;
+    mtx_unlock(&rh->mutex);
 }
 
 mx_status_t xhci_root_hub_init(xhci_t* xhci, int rh_index) {
@@ -230,6 +232,7 @@ mx_status_t xhci_root_hub_init(xhci_t* xhci, int rh_index) {
     size_t rh_ports = xhci->rh_num_ports;
 
     list_initialize(&rh->pending_intr_reqs);
+    mtx_init(&rh->mutex, mtx_plain);
 
     rh->device_desc = xhci_rh_device_descs[rh_index];
     rh->config_desc = (usb_configuration_descriptor_t *)xhci_rh_config_desc;
@@ -307,9 +310,6 @@ mx_status_t xhci_start_root_hubs(xhci_t* xhci) {
             return status;
         }
     }
-
-    // process initial port states
-    xhci_handle_root_hub_change(xhci, true);
 
     return NO_ERROR;
 }
@@ -401,6 +401,7 @@ static mx_status_t xhci_rh_control(xhci_t* xhci, xhci_root_hub_t* rh, usb_setup_
         } else if (request == USB_REQ_CLEAR_FEATURE) {
             uint16_t* change_bits = &rh->port_status[port_index].wPortChange;
 
+            mtx_lock(&rh->mutex);
             switch (value) {
                 case USB_FEATURE_C_PORT_CONNECTION:
                     *change_bits &= ~USB_PORT_CONNECTION;
@@ -418,14 +419,19 @@ static mx_status_t xhci_rh_control(xhci_t* xhci, xhci_root_hub_t* rh, usb_setup_
                     *change_bits &= ~USB_PORT_RESET;
                     break;
             }
+            mtx_unlock(&rh->mutex);
+
             txn->ops->complete(txn, NO_ERROR, 0);
             return NO_ERROR;
         } else if ((request_type & USB_DIR_MASK) == USB_DIR_IN &&
                    request == USB_REQ_GET_STATUS && value == 0) {
+            mtx_lock(&rh->mutex);
             usb_port_status_t* status = &rh->port_status[port_index];
             size_t length = txn->length;
             if (length > sizeof(*status)) length = sizeof(*status);
             txn->ops->copyto(txn, status, length, 0);
+            mtx_unlock(&rh->mutex);
+
             txn->ops->complete(txn, NO_ERROR, length);
             return NO_ERROR;
         }
@@ -444,12 +450,15 @@ static mx_status_t xhci_rh_control(xhci_t* xhci, xhci_root_hub_t* rh, usb_setup_
 }
 
 static void xhci_rh_handle_intr_req(xhci_root_hub_t* rh, iotxn_t* txn) {
+    xprintf("xhci_rh_handle_intr_req\n");
     uint8_t status_bits[128 / 8];
     bool have_status = 0;
     uint8_t* ptr = status_bits;
     int bit = 1;    // 0 is for hub status, so start at bit 1
 
     memset(status_bits, 0, sizeof(status_bits));
+
+    mtx_lock(&rh->mutex);
 
     for (uint32_t i = 0; i < rh->num_ports; i++) {
         usb_port_status_t* status = &rh->port_status[i];
@@ -472,6 +481,8 @@ static void xhci_rh_handle_intr_req(xhci_root_hub_t* rh, iotxn_t* txn) {
         // queue transaction until we have something to report
         list_add_tail(&rh->pending_intr_reqs, &txn->node);
     }
+
+    mtx_unlock(&rh->mutex);
 }
 
 mx_status_t xhci_rh_iotxn_queue(xhci_t* xhci, iotxn_t* txn, int rh_index) {
@@ -492,7 +503,7 @@ mx_status_t xhci_rh_iotxn_queue(xhci_t* xhci, iotxn_t* txn, int rh_index) {
     return ERR_NOT_SUPPORTED;
 }
 
-void xhci_handle_root_hub_change(xhci_t* xhci, bool initial_state) {
+void xhci_handle_root_hub_change(xhci_t* xhci) {
     volatile xhci_port_regs_t* port_regs = xhci->op_regs->port_regs;
 
     xprintf("xhci_handle_root_hub_change\n");
@@ -504,7 +515,7 @@ void xhci_handle_root_hub_change(xhci_t* xhci, bool initial_state) {
 #if DEBUG_PORTSC
         print_portsc(i, portsc);
 #endif
-        if (status_bits || initial_state) {
+        if (status_bits) {
             bool connected = !!(portsc & PORTSC_CCS);
             bool enabled = !!(portsc & PORTSC_PED);
 
@@ -517,9 +528,11 @@ void xhci_handle_root_hub_change(xhci_t* xhci, bool initial_state) {
             int port_index = xhci->rh_port_map[i];
             usb_port_status_t* status = &rh->port_status[port_index];
 
+            mtx_lock(&rh->mutex);
+
             // We may not have the PORTSC_CSC "connect state changed" bit set
             // if the device was already connected at boot
-            if ((portsc & PORTSC_CSC) || (initial_state && connected)) {
+            if (portsc & PORTSC_CSC) {
                 // connect status change
                 xprintf("port %d PORTSC_CSC connected: %d\n", i, connected);
                 if (connected) {
@@ -538,6 +551,10 @@ void xhci_handle_root_hub_change(xhci_t* xhci, bool initial_state) {
                 if (enabled) {
                     status->wPortStatus &= ~USB_PORT_RESET;
                     status->wPortChange |= USB_PORT_RESET;
+                    if (!(status->wPortStatus & USB_PORT_ENABLE)) {
+                        status->wPortStatus |= USB_PORT_ENABLE;
+                        status->wPortChange |= USB_PORT_ENABLE;
+                    }
 
                     if (speed == USB_SPEED_LOW) {
                         status->wPortStatus |= USB_PORT_LOW_SPEED;
@@ -546,6 +563,7 @@ void xhci_handle_root_hub_change(xhci_t* xhci, bool initial_state) {
                     }
                 }
             }
+            mtx_unlock(&rh->mutex);
 
             if (status->wPortChange) {
                 iotxn_t* txn = list_remove_head_type(&rh->pending_intr_reqs, iotxn_t, node);
